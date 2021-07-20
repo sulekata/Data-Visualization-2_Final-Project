@@ -1,0 +1,423 @@
+---
+title: "Board Games"
+subtitle: "Final Project - Data Visualization 2 Course"
+author: "Kata Süle"
+date: '7th April 2021'
+output: html_document
+# editor_options:
+#   chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+## 1. Setup
+
+```{r}
+# import packages
+library(data.table)
+library(skimr)
+library(ggplot2)
+library(stringr)
+library(GGally)
+library(ggthemr)
+library(ggrepel)
+library(ggiraph)
+library(widyr)
+library(tibble)
+library(gganimate)
+library(transformr)
+library(glue)
+```
+
+## 2. Import and clean data
+
+For this project I used a dataset about [board games](https://github.com/rfordatascience/tidytuesday/tree/master/data/2019/2019-03-12) from the GitHub page of the [TidyTuesday project](https://github.com/rfordatascience/tidytuesday). 
+
+```{r, cache=TRUE}
+# import data
+df <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2019/2019-03-12/board_games.csv")
+
+# convert it to a data table object
+df <- as.data.table(df)
+```
+
+After importing the data I checked its structure and whether the variable types were correct. Then I filtered those columns that I planned to use for the visualizations later on. The descriptions of variables can be found [here](https://github.com/rfordatascience/tidytuesday/tree/master/data/2019/2019-03-12). I converted the expansion (whether the game is part of an expansion pack) and the compilation (whether the game is part of a compilation) to binary due to the abundance of different values. Then I only kept complete observations.
+
+```{r}
+# check structure of the data
+# str(df)
+# data types are fine
+
+# filter columns
+df <- df[ , .(game_id, name, max_players, max_playtime, min_age, min_players, min_playtime, mechanic, playing_time, year_published, category, compilation, expansion, average_rating, users_rated)]
+
+# skim data
+#skim(df)
+# the numeric variables are all complete
+# the categorical ones have missing values
+
+# convert compilation and expansion variables to binary
+df[, compilation := as.factor(ifelse(is.na(compilation) == TRUE, 0, 1))]
+df[, expansion := as.factor(ifelse(is.na(expansion) == TRUE, 0, 1))]
+
+# drop observations where category or mechanic is missing
+df <- df[is.na(category) == FALSE]
+df <- df[is.na(mechanic) == FALSE]
+
+# check summary
+#summary(df)
+```
+
+## 3. Quick visualizations for exploration
+
+```{r}
+# set an overall theme for plots
+ggthemr('dust')
+```
+
+At first I created some basic charts to see the characteristics of the data. The first histogram below shows the distribution of maximum players. We can see that it is very skewed. From the calculations below we can say that only a small portion (437 out of the total 9507 observations) have a value higher than 8. As for the histogram below the first one we can see that it is much less skewed than the previous one. We can also see that most games require at least 6 or less people.
+
+```{r, fig.align = 'center', out.width="50%"}
+### quick visualizations to explore the data
+
+# histogram for max players
+hist(df$max_players)
+
+nrow(df[max_players > quantile(df$max_players, probs = 0.95)])
+
+# histogram for min players
+hist(df$min_players)
+```
+
+The histogram below shows the distribution of the minimum age variable. We can see that it is mostly around 10. Below it is the histogram for the minimum playtime variable. The distribution is very skewed, however the calculations show that only 358 games last longer than 240 minutes which is the 95. percentile.
+
+```{r, fig.align = 'center', out.width="50%"}
+# histogram for min age
+hist(df$min_age)
+
+# histogram for min playtime
+hist(df$min_playtime)
+
+nrow(df[min_playtime > quantile(df$min_playtime, probs = 0.95)])
+```
+
+The histograms of the maximum playtime and playing time variables look exactly the same as the one for minimum playtime therefore I did not display them.
+
+The two histograms below show information about the ratings of games. We can conclude that most games have an average rating around 6 and that most games are rated by maximum 5000 people.
+
+```{r, fig.align = 'center', out.width="50%"}
+# histogram for average rating
+hist(df$average_rating)
+
+# histogram for users rated
+hist(df$users_rated)
+```
+
+With the plot below I wanted to inspect how many games were published each year. It seems like the number is growing as we move towards the present year. It is interesting that the rate seems to be exponential.
+
+```{r, fig.align = 'center'}
+# check the distribution by year
+ggplot(df[, .N, by = year_published], aes(x= year_published, y=N)) +
+  geom_col() +
+  ggtitle('Number of published games by year') +
+  xlab("") +
+  ylab("")
+```
+
+I was also curios about how many games were part of an expansion pack or a compilation. Below we can see that there are much more stand alone games, however the number of expansions is relatively large.
+
+```{r}
+# check compilations and expansions
+table(df$compilation)
+# there are much more games which are not part of a compilation
+table(df$expansion)
+# around 30% of games is part of an expansion
+```
+
+The last plot of the exploration part shows pairwise correlations and conditional distributions of a few selected variables. We can see that there is a negative correlation between the average playtime and the minimum required years whereas there is a positive one between the year when the game was published and the average rating. There are a few extreme values for the number of users variable.
+
+```{r, fig.width = 10, fig.height= 10, fig.align = 'center'}
+### check correlations and conditional distributions
+# create list with columns to exclude because they either have to many levels or are not so relevant
+list_to_drop <- c('name', 'category', 'mechanic', 'cat_1', 'game_id', 'max_players', 'max_playtime', 'min_playtime', 'compilation', 'expansion')
+
+# create filtered df
+pairwise_df <- df[ , !names(df) %in% list_to_drop, with=FALSE]
+
+# plot
+ggpairs(pairwise_df[sample(nrow(pairwise_df), 100), ]) +
+  ggtitle('Pairwise correlations and conditional distributions')
+```
+
+## 4. MDS for a subsample of board games
+
+```{r, fig.width = 10, fig.align = 'center'}
+# select a random game from every year between 1990 and 2016
+# create empty data frame where rows can be added
+mds_df <- data.frame(matrix(ncol = ncol(df), nrow = 0))
+colnames(mds_df) <- colnames(df) # add column names
+
+# select the games
+set.seed(20210406)
+for (i in 1990:2016){
+  temp_df <- df[year_published == i]
+  mds_df <- rbind(mds_df, temp_df[sample(nrow(temp_df), 1),])
+}
+
+# put the names of the games as row names
+mds_df <- column_to_rownames(mds_df, var = 'name')
+
+# filter numeric variables
+mds_df <- mds_df[, lapply(mds_df, is.numeric) == TRUE]
+
+# create distance matrix and perform MDS
+mds_df <- cmdscale(dist(scale(mds_df)))
+mds_df <- as.data.frame(mds_df) # convert to df
+mds_df$game <- rownames(mds_df) # add names of cars
+rownames(mds_df) <- NULL
+
+# create the plot
+ggplot(data = mds_df, aes(x = V1, y = V2, label = game)) +
+  geom_text_repel() +
+  labs( x = '', y = '', title = 'MDS for games published between 1990 and 2016') +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(),
+          axis.text.y=element_blank(),axis.ticks=element_blank())
+```
+
+I performed MDS on a random subsample of games where I selected a game from every year between 1990 and 2016. This was necessary because there were too many observations. In the plot above we can see which games are close to each other based on their numerical features. Even though they were selected from different years they seem to form groups with a few exceptions. This plot could be useful in case someone is looking for a game which is similar to one he or she likes.
+
+## 5. Plotting individual variables
+
+#### a. Top 10 categories by number of games
+
+```{r, fig.width = 15, fig.align = 'center'}
+# check the categories with the most games
+# separate categories into rows so that each game has as many rows as many categories it belongs to
+df_cat <- tidyr::separate_rows(df, category, sep = ",")
+
+# convert back to data table
+df_cat <- as.data.table(df_cat)
+
+# calculate number of games in each category and get top 10
+df_cat <- df_cat[ , .(num = .N), by = category][order(-num)][1:10]
+
+# create plot
+ggplot(df_cat, aes(x = reorder( category, num ), y = num)) + 
+  geom_segment(aes(x = reorder( category, num ), xend = category, y = 0, yend = num)) + 
+  geom_point(size = 5) + 
+  labs( x = "", y = "", title = "Top 10 categories based on number of games") + 
+  coord_flip() +
+  geom_text(aes(label=num),hjust=-0.5, vjust=0.5) +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(),
+axis.ticks=element_blank())
+```
+
+In the plot above we can see that most games in the dataset are card games. This can be a favoured format by publishers because these games are more portable than the ones that require a board. Therefore people are more willing to choose them.
+
+#### b. Show mechanics which usually appear together
+
+```{r, fig.align = 'center'}
+# separate the mechanics into separate rows
+# so each game has as many rows as many mechanics were assigned to it
+df_mech <- tidyr::separate_rows(df, mechanic, sep = ",")
+
+# convert back to data table
+df_mech <- as.data.table(df_mech)
+
+# calculate pairwise correlations for mechanics that appear together frequently
+corr <- pairwise_cor(df_mech, mechanic, name, sort = T)
+
+# convert back to data table
+corr <- as.data.table(corr)
+
+# filter for where correlation is stronger
+corr_plot <- corr[correlation > 0.2]
+
+# get those mechanics where correlation is strongest plus all their pairwise correlations
+corr_plot <- corr[item1 %in% corr_plot$item1 & item2 %in% corr_plot$item1]
+
+# create heatmap
+ggplot(corr_plot, aes(item1, item2, fill = correlation)) +
+  geom_tile() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  labs(x="", y="", title = "Correlation between some mechanics") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+  
+```
+
+In the dataset I had information about the mechanics of the games. The heatmap above shows which are the ones that usually appear together.
+
+## 6. Investigating the connection between variables
+
+#### a. Connection between published year and rating
+
+```{r, fig.align = 'center'}
+ggplot(df, aes(x = year_published, y = average_rating)) +
+  geom_point( alpha = 0.25) +
+  geom_smooth(method = 'lm') +
+  labs( x='Year of publishing', y='Average rating', title = 'Relationship between average rating and year of publishing') +
+  geom_point(data = df[name == 'BANG!'], color = 'black') + 
+  geom_text_repel(data = df[name == 'BANG!'],
+                  aes(label = name),
+                  direction="y",
+                  nudge_y = -0.5,
+                  point.padding = 0.25,
+                  segment.color = NA,
+                  fontface="bold")
+```
+
+We can see in the plot above that the more recent a game is the higher rating it has on average. I highlighted one of my favourite games on the plot to see where it is located.
+
+#### b. Connection between average rating and number of ratings
+
+```{r, fig.align = 'center'}
+# took log of number of ratings because there were a few extreme values
+
+ggplot(df, aes(x = log(users_rated), y = average_rating)) +
+  geom_point( alpha = 0.25) +
+  geom_smooth(method = 'lm') +
+  labs( x='Number of ratings (ln)', y='Average rating', title = 'Relationship between average rating and number of ratings') +
+  geom_point(data = df[name == 'BANG!'], color = 'black') + 
+  geom_text_repel(data = df[name == 'BANG!'],
+                  aes(label = name),
+                  direction="y",
+                  nudge_y = -0.5,
+                  point.padding = 0.25,
+                  segment.color = NA,
+                  fontface="bold")
+```
+
+Based on the plot above we can conclude that the more ratings a game has the higher the value of the rating in general. This could be because people are more likely to rate a game if they like it. Just like before I highlighted BANG! to see where it is on the chart.
+
+#### c. Connection between number of games and average rating by mechanic
+
+```{r, fig.width = 10, fig.align = 'center'}
+# get number of games by mechanic and average rating
+df_mech <- df_mech[ , list(num = .N, rating = mean(average_rating)), by = mechanic]
+
+# create interactive plot
+p1 <- ggplot(df_mech, aes(x=num, y=rating, tooltip = mechanic, data_id = mechanic)) +
+  geom_point_interactive() +
+  labs(x='Number of games', y='Average rating', title = 'Relationship between rating and number of games \n (Hover over points to see mechanic)')
+
+# customize tooltips
+tooltip_css <- "background-color:gray;color:white;font-style:italic;padding:10px;border-radius:5px;"
+girafe(ggobj = p1,
+  options = list( opts_tooltip(css = tooltip_css),
+                  opts_hover_inv(css = "opacity:0.3;"),
+                  opts_hover(css = "fill:red;")))
+```
+
+If we hover over the points we can see that the number of simpler games (whose mechanic is dice rolling for example) is higher, however these are not the highest rated ones. The highest rated ones involve some kind of strategy building.
+
+#### d. Connection between average playtime and year of publishing
+
+```{r, fig.align = 'center'}
+# calculate average playtime by year
+df_play <- df[ , .(playtime = mean(playing_time)), by = year_published]
+
+# filter years because there are too many of them
+df_play <- df_play[year_published >= 1990]
+
+# calculate overall average
+df_play[ , norm_playtime := round((playtime - mean(playtime))/sd(playtime), 2)]
+
+# add if an observation is above or below average
+df_play[ , type := ifelse(norm_playtime < 0, 'below', 'above')]
+
+# sort values based on playtime
+df_play <- df_play[order(norm_playtime), ]
+
+# convert year to factor so that order remains the same on the plot
+df_play <- df_play[, year_published := factor(year_published, levels = year_published)]
+
+# create diverging bar chart
+ggplot(df_play, aes(x=year_published, y=norm_playtime, label=norm_playtime)) + 
+  geom_bar(stat='identity', aes(fill=type), width=.5)  +
+  scale_fill_manual(name="Playtime", 
+                    labels = c("Above Average", "Below Average"), 
+                    values = c("above"="#00ba38", "below"="#f8766d")) + 
+  labs(title= "The change of playtime over the years", y="", x="") + 
+  coord_flip() +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(),axis.ticks=element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+```
+
+The chart above shows that after we normalize the average playtime of games for each year the playtime is getting shorter as we approach the present year.
+
+## 7. Inspect relationships with animations
+
+#### a. Relationship between minimum players and minimum playtime by category
+
+```{r, fig.align = 'center', fig.width=10}
+# inspect the relationship between min players and min playtime by category
+# separate categories
+df_cat <- tidyr::separate_rows(df, category, sep = ",")
+
+# convert back to data table
+df_cat <- as.data.table(df_cat)
+
+# get top 5 categories based on number of ratings
+top <- df_cat[ , .(num_rating = mean(users_rated)), by = category][order(-num_rating)][1:5, category]
+
+# filter df_cat for these categories
+df_cat <- df_cat[category %in% top]
+
+# keep games that last for a maximum of 5 hours
+df_cat <- df_cat[min_playtime < 300]
+
+# rename expansion categories
+df_cat[, expansion := ifelse(expansion == 1, 'Expansion', 'Not Expansion')]
+
+# create scatter plot
+p2 <- ggplot(df_cat, aes(x=min_players, y = min_playtime, size = average_rating)) +
+  geom_point(show.legend = FALSE, alpha= .7) +
+  xlab("Minimum players") +
+  ylab("Minimum playtime") +
+  facet_wrap(~expansion)
+
+# animate the plot
+#p2 + transition_states(category) +
+#  labs(title = "Category: {closest_state}")
+
+# save animation because otherwise the rmd takes too much time to knit
+#anim_save('C:/CEU/Winter_Term/Data Visualization 2/Final Project/anim2.gif')
+
+# import animation
+knitr::include_graphics("C:/CEU/Winter_Term/Data Visualization 2/Final Project/anim2.gif")
+```
+
+Based on the animation above we can see how the minimum players and the minimum playtime changes among categories split by whether the game is an expansion. The sizes of the dots show the average rating of the games.
+
+#### b. Average rating by published year and compilation
+
+```{r, fig.align = 'center', fig.width=10}
+# calculate average rating by year
+df_rev <- df[, .(rating = mean(average_rating)), by=.(year_published, compilation)]
+
+# rename expansion categories
+df_rev[, compilation := ifelse(compilation == 1, 'Compilation', 'Not Compilation')]
+
+# create line chart
+p3 <- ggplot(df_rev, aes(x=year_published, y=rating, group=factor(compilation), color = compilation)) +
+  scale_color_manual(values=c("#CC6666", "#9999CC")) +
+  geom_line(size=1) +
+  labs(x = "Year of publishing", y = "Average rating", title = "Change of average rating over the years") +
+  theme(legend.title = element_blank())
+
+# animate the plot
+#p3 + transition_reveal(year_published)
+
+# save animation because otherwise the rmd takes too much time to knit
+#anim_save('C:/CEU/Winter_Term/Data Visualization 2/Final Project/anim1.gif')
+
+# import animation
+knitr::include_graphics("C:/CEU/Winter_Term/Data Visualization 2/Final Project/anim1.gif")
+```
+
+The last animation shows that the ratings are increasing as we get closer to the present year both for compilations and non-compilations. For the compilation games the fluctuation for the is stronger.
